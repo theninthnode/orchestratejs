@@ -1,0 +1,19 @@
+{
+  "name": "orchestrate",
+  "description": "API Aggregator",
+  "version": "0.0.1",
+  "author": "Billy Jones",
+  "private": false,
+  "repository": {},
+  "main": "app.js",
+  "engines": {
+    "node": "0.10.x"
+  },
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "async": "^0.9.0"
+  },
+  "devDependencies": {}
+}
