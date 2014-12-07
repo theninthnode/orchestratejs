@@ -13,8 +13,20 @@ describe('Orchestrate', function(){
 			map: {sort: 'sort', direction: 'direction', limit: 'limit', offset: 'offset'}
 		},
 		{
+			key: 'customer_notes',
+			url: '/api/customer_notes',
+			headers: [],
+			map: {sort: 'sort', direction: 'direction', limit: 'limit', offset: 'offset'}
+		},
+		{
 			key: 'bookings',
 			url: '/api/bookings',
+			headers: [],
+			map: {sort: 'sort', direction: 'direction', limit: 'limit', offset: 'offset'}
+		},
+		{
+			key: 'booking_notes',
+			url: '/api/booking_notes',
 			headers: [],
 			map: {sort: 'sort', direction: 'direction', limit: 'limit', offset: 'offset'}
 		}]
@@ -81,24 +93,42 @@ describe('Orchestrate', function(){
 
 	it('should build join collection', function(done){
 		
-		q.setSelect('*').setFrom('customers').setJoin('bookings', '_id', 'customer_id');
+		j = new Query(config);
+		j.setSelect('start_time').setFrom('bookings').setLimit(500);
+		
+		q.setFrom('customers').setJoin(j, '_id', 'customer_id', 'bookings');
+
 		expect(q.getFrom()).to.equal('customers');
 		expect(q.getJoins().length).to.equal(1);
-		expect(q.getJoins()[0].key).to.equal('bookings');
+		expect(q.getJoins()[0].query.getFrom()).to.equal('bookings');
 		expect(q.getJoins()[0].fromProperty).to.equal('_id');
 		expect(q.getJoins()[0].toProperty).to.equal('customer_id');
 
 		done();
 	});
 
-	it('should return error as null', function(done){
+	it('should return queries', function(done){
 		
-		q.setSelect('firstname').setFrom('customers').setJoin('bookings', 'bookings.customer_id', 'customers._id', 'bookings').setWhere('customers._id', 123);
+		var booking_notes = new Query(config);
+		booking_notes.setSelect('note').setFrom('booking_notes');
 
-		q.setLimit(100);
-		q.setOrderBy('lastname', 'desc');
+		var bookings = new Query(config);
+		bookings.setSelect('start_time').setFrom('bookings').setLimit(500);
+		bookings.setJoin(booking_notes, 'booking_notes.booking_id', 'bookings._id', 'notes');
 
-		q.get(function(err, data){
+		var customer_notes = new Query(config);
+		customer_notes.setFrom('customer_notes');
+
+		var customers = new Query(config);
+
+		customers.setSelect('firstname').setFrom('customers');
+		customers.setJoin(bookings, 'bookings.customer_id', 'customers._id', 'bookings');
+		customers.setJoin(customer_notes, 'notes.customer_id', 'customers._id', 'notes');
+
+		customers.setLimit(100);
+		customers.setOrderBy('lastname', 'desc');
+
+		customers.get(function(err, data){
 			expect(err).to.equal(null);
 			done();
 		});

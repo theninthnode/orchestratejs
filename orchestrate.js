@@ -28,23 +28,37 @@ var _ = require('lodash');
         if(configError !== false) {
             callback(configError);
         } else {
-            callback(null);
+
+            // build main query
+            // then loop joins
+
+            queries = addQuery(global.getFrom(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir, global.getJoins());
+            
+            // console.log(queries);
+
+            executeQuery(queries);
+            
+            callback(null, queries);
         }
 
-        // build main query
-        // then loop joins
-
-        addQuery(global.getFrom(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir);
-        
-        var j = global.getJoins();
-        for (var i = j.length - 1; i >= 0; i--) {
-            addQuery(j[i].key, null, null, null, null, null, j[i].populateAs);
-        };
-
-        console.log(queries);
     }
 
-    var addQuery = function(key, select, where, limit, sortOn, sortDir, populateAs) {
+    var executeQuery = function(query) {
+        
+        var query_conf = _.find(config.endpoints, function(e) {
+            return e.key === query.key;
+        });
+
+        console.log('Executing', query_conf.url);
+
+        for (var i = query.joins.length - 1; i >= 0; i--) {
+            executeQuery(query.joins[i]);
+        };
+
+
+    };
+
+    var addQuery = function(key, select, where, limit, sortOn, sortDir, joins, populateAs) {
 
         // query object
         var obj = {
@@ -71,13 +85,19 @@ var _ = require('lodash');
             obj.sortDir = sortDir;
         }
 
+        var j = joins || [];
+        obj.joins = [];
+
+        for (var i = j.length - 1; i >= 0; i--) {
+            obj.joins.push(addQuery(j[i].query.getFrom(), j[i].query.getSelect(), j[i].query.getWhere(), j[i].query.getLimit(), j[i].query.getOrderBy().sortOn, j[i].query.getOrderBy().sortDir, j[i].query.getJoins(), j[i].populateAs));
+        };
+
         // if join
         if(populateAs) {
             obj.populateAs = populateAs;
         }
 
-        queries.push(obj);
-
+        return obj;
     };
 
     var checkConfig = function(conf) {
@@ -157,11 +177,8 @@ var _ = require('lodash');
 
     Orchestrate.prototype.setWhere = function(property, value) {
         
-        this.wheres.push({
-            property: property,
-            value: value
-        });
-
+        this.wheres[property] = value;
+            
         return this;
 
     };
@@ -170,13 +187,13 @@ var _ = require('lodash');
         return this.wheres;
     };    
 
-    Orchestrate.prototype.setJoin = function(key, fromProperty, toProperty, populateAs) {
+    Orchestrate.prototype.setJoin = function(query, fromProperty, toProperty, populateAs) {
     	
         this.joins.push({
-            key: key,
+            query: query,
             fromProperty: fromProperty,
             toProperty: toProperty,
-            populateAs: (typeof populateAs !== 'undefined' ? populateAs : key)
+            populateAs: populateAs
         });
 
         return this;
@@ -210,7 +227,6 @@ var _ = require('lodash');
     Orchestrate.prototype.get = function(callback) {
 
         buildQueries(this, function(err, results) {
-        	
             if(typeof callback === 'function') {
         		callback(err, results); // pass data
         	}
