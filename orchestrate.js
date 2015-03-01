@@ -1,16 +1,13 @@
-var _ = require('lodash');
+var _ = require('lodash'),
+    http = require('http'),
+    urlParser = require('url'),
+    async = require('async');
 
 (function () {
 	
-    var error = null,
-        queries = [],
-        joins = [],
-        results,
-        config = {};
-
 	var Orchestrate = function(config) {
 		this.config = config;
-        this.wheres = [];
+        this.wheres = {};
         this.joins = [];
 	};
 
@@ -19,46 +16,193 @@ var _ = require('lodash');
     // check endpoints exist
     // set up each query
     // process results
-    var buildQueries = function(global, callback) {
+    var buildQueries = function(global, topLevelCallback) {
         
         config = global.config;
 
         var configError = checkConfig(config)
 
-        if(configError !== false) {
-            callback(configError);
-        } else {
-
-            // build main query
-            // then loop joins
-
-            queries = addQuery(global.getFrom(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir, global.getJoins());
+        if(configError === false) {
             
+            // build top level query
+            // then inside recusively loop joined queries
+            var queries = addQuery(global.getFrom(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir, global.getJoins());
+
             // console.log(queries);
 
-            executeQuery(queries);
+            executeQuery(queries, null, topLevelCallback); // pass in empty results
             
-            callback(null, queries);
+
+        } else {
+            topLevelCallback(configError);
         }
 
     }
 
-    var executeQuery = function(query) {
+    var executeQuery = function(query, parentResults, parentCallback) {
         
+        // get config
         var query_conf = _.find(config.endpoints, function(e) {
             return e.key === query.key;
         });
 
-        console.log('Executing', query_conf.url);
+        // console.log(query_conf);
+        
+        // results undefined define array or object
+        if(parentResults === null) {
 
-        for (var i = query.joins.length - 1; i >= 0; i--) {
-            executeQuery(query.joins[i]);
-        };
+            if(query_conf.isArray === true) {
+                parentResults = [];
+            } else {
+                parentResults = {};
+            }
+
+        }
+
+        // console.log('Parent results:', parentResults);
+
+        var bindings = {};
+
+        // process bindings
+        if(typeof query.bind === 'function') {
+            bindings = query.bind(parentResults);
+        }
 
 
+        // exchange placeholders (:city) with bindings
+        for (var b in bindings) {
+            if (bindings.hasOwnProperty(b)) {
+                
+                // binding undefined
+                if(typeof bindings[b] === 'undefined') {
+                    parentCallback('Binding error: could not bind ' + (query.populateAs || query.key ) + '. :' + b + ' was undefined.', null); return;
+                }
+
+                for(w in query.where) {
+                    if (query.where.hasOwnProperty(w)) {
+                        if(query.where[w] === (':'+b)){
+                            // found match so replace and continue
+                            query.where[w] = bindings[b];
+                            continue;
+                        };
+                    }
+                }
+            }
+        }
+
+        // build url
+        var query_string = serialize(query.where);
+        var url = query_conf.url;
+
+        // console.log(query_string);
+
+        // execute url http request
+        executeRequest(url, query_string, function(err, resp) {
+    
+            if(err) {
+                parentCallback(err); return;
+            }
+
+            // get http request results and turn into json
+            var res = JSON.parse(resp);
+
+            // console.log(res);
+
+            // does this enpoint return an array
+            if(query_conf.isArray === true) {
+
+                parentResults[query.populateAs || query.key] = [];
+
+                async.each(res, function(r, outterCb) {
+                        
+                        // pick out the data we want
+                        var _r = _.pick(r, query.select);
+                        parentResults[query.populateAs || query.key].push(_r);
+                        // console.log(_r);
+
+                        // recursively execute joins
+                        async.each(query.joins, function(join, cb) {
+                            executeQuery(join, _r, cb);
+                        }, function(e) { 
+                            outterCb(e);  
+                        });
+
+                }, function(e) {
+                    // console.log('Finished children of query:', url);
+                    parentCallback(e);
+                });                  
+                
+            }
+            // single resource
+            else {
+
+                // pick out the data we want
+                // console.log(query.select);
+                var key = query.populateAs || query.key;
+                if(typeof query.select !== 'undefined') {
+                    
+                    var _r = _.pick(res, query.select);
+                    _r = _r[query.select];
+
+                    parentResults[key] = _r;
+
+                } else {
+                    parentResults[key] = res;
+                }
+                // console.log('parentResults', parentResults);
+
+                if(query.joins.length === 0) {
+                    parentCallback(null, parentResults);                
+                // process joins
+                } else {
+
+                    // recursively execute joins
+                    async.each(query.joins, function(join, cb) {
+                        executeQuery(join, parentResults, cb);
+                    }, function(e) {
+                        parentCallback(e, parentResults);
+                    });
+                    
+                }
+
+
+            }
+
+        });
     };
 
-    var addQuery = function(key, select, where, limit, sortOn, sortDir, joins, populateAs) {
+    var executeRequest = function(url, query_string, callback) {
+        
+        var parts = urlParser.parse(url);
+
+        var options = {
+            host: parts.hostname,
+            path: parts.pathname +  '?' + query_string
+        };
+
+        var cb = function(response) {
+            var str = '';
+
+            //another chunk of data has been recieved, so append it to `str`
+            response.on('data', function (chunk) {
+                str += chunk;
+            });
+
+            //the whole response has been recieved, so we pass it back here
+            response.on('end', function () {
+
+                callback(null, str);
+            });
+
+            response.on('error', function (e) {
+                callback(e);
+            });
+        }
+
+        http.request(options, cb).end();
+    };
+
+    var addQuery = function(key, select, where, limit, sortOn, sortDir, joins, bind, populateAs) {
 
         // query object
         var obj = {
@@ -89,8 +233,13 @@ var _ = require('lodash');
         obj.joins = [];
 
         for (var i = j.length - 1; i >= 0; i--) {
-            obj.joins.push(addQuery(j[i].query.getFrom(), j[i].query.getSelect(), j[i].query.getWhere(), j[i].query.getLimit(), j[i].query.getOrderBy().sortOn, j[i].query.getOrderBy().sortDir, j[i].query.getJoins(), j[i].populateAs));
+            obj.joins.push(addQuery(j[i].query.getFrom(), j[i].query.getSelect(), j[i].query.getWhere(), j[i].query.getLimit(), j[i].query.getOrderBy().sortOn, j[i].query.getOrderBy().sortDir, j[i].query.getJoins(), j[i].bind, j[i].populateAs));
         };
+
+        // if join
+        if(bind) {
+            obj.bind = bind;
+        }
 
         // if join
         if(populateAs) {
@@ -151,6 +300,25 @@ var _ = require('lodash');
 
     };
 
+    // http://stackoverflow.com/questions/1714786/querystring-encoding-of-a-javascript-object
+    var serialize = function(obj, prefix) {
+        var str = [];
+        for(var p in obj) {
+            if (obj.hasOwnProperty(p)) {
+                var k = prefix ? prefix + "[" + p + "]" : p, v = obj[p];
+                str.push(typeof v == "object" ?
+                serialize(v, k) :
+                encodeURIComponent(k) + "=" + encodeURIComponent(v));
+            }
+        }
+        return str.join("&");
+    }
+
+    var checkComplete = function() {
+        return (registry.length === 0 && started === true);
+    }
+
+
     // -------- Public API --------
 
 	Orchestrate.prototype.setSelect = function() {
@@ -175,9 +343,9 @@ var _ = require('lodash');
         return this.from_endpoint;    
     };
 
-    Orchestrate.prototype.setWhere = function(property, value) {
+    Orchestrate.prototype.addWhere = function(key, val) {
         
-        this.wheres[property] = value;
+        this.wheres[key] = val;
             
         return this;
 
@@ -187,13 +355,13 @@ var _ = require('lodash');
         return this.wheres;
     };    
 
-    Orchestrate.prototype.setJoin = function(query, fromProperty, toProperty, populateAs) {
+    Orchestrate.prototype.addJoin = function(query, options) {
     	
         this.joins.push({
             query: query,
-            fromProperty: fromProperty,
-            toProperty: toProperty,
-            populateAs: populateAs
+            method: options.method || 'waterfall',
+            bind: options.bind || null, 
+            populateAs: options.populateAs || null
         });
 
         return this;
@@ -227,10 +395,7 @@ var _ = require('lodash');
     Orchestrate.prototype.get = function(callback) {
 
         buildQueries(this, function(err, results) {
-            if(typeof callback === 'function') {
-        		callback(err, results); // pass data
-        	}
-
+            callback(err, results);
         });
 
     };

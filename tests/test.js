@@ -7,6 +7,10 @@ describe('Orchestrate', function(){
 
 	config = {
 		endpoints: [{
+			key: 'weather',
+			url: 'http://api.openweathermap.org/data/2.5/weather'
+		},
+		{
 			key: 'customers',
 			url: '/api/customers',
 			headers: [],
@@ -96,41 +100,37 @@ describe('Orchestrate', function(){
 		j = new Query(config);
 		j.setSelect('start_time').setFrom('bookings').setLimit(500);
 		
-		q.setFrom('customers').setJoin(j, '_id', 'customer_id', 'bookings');
+		q.setFrom('customers').addJoin(j, {method: 'waterfall', populateAs: 'bookings'});
 
 		expect(q.getFrom()).to.equal('customers');
 		expect(q.getJoins().length).to.equal(1);
 		expect(q.getJoins()[0].query.getFrom()).to.equal('bookings');
-		expect(q.getJoins()[0].fromProperty).to.equal('_id');
-		expect(q.getJoins()[0].toProperty).to.equal('customer_id');
+		expect(q.getJoins()[0].method).to.equal('waterfall');
+		expect(q.getJoins()[0].bind).to.equal(null);
+		expect(q.getJoins()[0].populateAs).to.equal('bookings');
 
 		done();
 	});
 
 	it('should return queries', function(done){
 		
-		var booking_notes = new Query(config);
-		booking_notes.setSelect('note').setFrom('booking_notes');
+		var weather = new Query(config).setFrom('weather');
+		weather.setSelect('weather');
+		weather.addWhere('q', ':city');
 
-		var bookings = new Query(config);
-		bookings.setSelect('start_time').setFrom('bookings').setLimit(500);
-		bookings.setJoin(booking_notes, 'booking_notes.booking_id', 'bookings._id', 'notes');
+		var customers = new Query(config).setFrom('customers');
 
-		var customer_notes = new Query(config);
-		customer_notes.setFrom('customer_notes');
-
-		var customers = new Query(config);
-
-		customers.setSelect('firstname').setFrom('customers');
-		customers.setJoin(bookings, 'bookings.customer_id', 'customers._id', 'bookings');
-		customers.setJoin(customer_notes, 'notes.customer_id', 'customers._id', 'notes');
+		customers.setSelect('firstname', 'lastname');
+		customers.addJoin(weather, {method: 'waterfall', bind: function(customer){
+			return {city: customer.city}; // maps to :city
+		}, populateAs: 'weather'});
 
 		customers.setLimit(100);
 		customers.setOrderBy('lastname', 'desc');
 
 		customers.get(function(err, data){
 			expect(err).to.equal(null);
-			done();
+			// done();
 		});
 		
 	});
