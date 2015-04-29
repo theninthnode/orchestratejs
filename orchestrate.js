@@ -1,7 +1,11 @@
+/*jshint maxstatements:15, maxdepth:2, maxcomplexity:5 */
+
 var _ = require('lodash'),
     http = require('http'),
+    https = require('https'),
     urlParser = require('url'),
-    async = require('async');
+    async = require('async'),
+    longjohn = require('longjohn');
 
 (function () {
 	
@@ -10,6 +14,8 @@ var _ = require('lodash'),
         this.wheres = {};
         this.joins = [];
 	};
+
+    // var parentResults = null;
 
     // check the config
     // check endpoints exist
@@ -29,8 +35,9 @@ var _ = require('lodash'),
 
             // console.log(queries); return;
 
-            executeQuery(queries, null, topLevelCallback); // pass in empty results
-            
+            executeQuery(queries, null, function(e,d) {
+                topLevelCallback(e, d);
+            }); // pass in public callback
 
         } else {
             topLevelCallback(configError);
@@ -44,18 +51,10 @@ var _ = require('lodash'),
         var query_conf = _.find(config.endpoints, function(e) {
             return e.key === query.key;
         });
-
-        // console.log(query_conf); return;
         
         // results undefined define array or object
         if(parentResults === null) {
-
-            if(query_conf.isArray === true) {
-                parentResults = [];
-            } else {
-                parentResults = {};
-            }
-
+            parentResults = {};
         }
 
         var bindings = {}, params = [];
@@ -65,7 +64,7 @@ var _ = require('lodash'),
             bindings = query.bind(parentResults);
         }
 
-        // console.log(query.bind);
+        // console.log('Parent REsults: ', parentResults);
 
         // exchange placeholders (:placeholder) with bindings
         for (var b in bindings) {
@@ -82,7 +81,7 @@ var _ = require('lodash'),
                     if (query.where.hasOwnProperty(w)) {
                         // console.log('query.where', query.where[w]);
                         if(query.where[w] === (':'+b)){
-                            // found match so replace and continue
+                            // found match so update params and continue
                             params[w] = bindings[b];
                             continue;
                         };
@@ -100,10 +99,9 @@ var _ = require('lodash'),
         var location = query_conf.location;
 
         console.log('location', location, query_string);
-        // console.log('parent rea', parentResults);
 
         // execute url http request
-        executeRequest(location, query_string, function(err, resp) {
+        executeRequest(location, query_conf.headers, query_string, function(err, resp) {
     
             if(err) {
                 parentCallback(err); return;
@@ -111,105 +109,121 @@ var _ = require('lodash'),
 
             // get http request results and turn into json
             var res = JSON.parse(resp);
-            // console.log(res);
 
-
-            // does this enpoint return an array / TODO!
             if(query_conf.isArray === true) {
 
-                // parentResults[query.populateAs || query.key] = [];
+                // console.log('ARRAY!!', res.tracks);
 
-                async.eachSeries(res, function(r, outterCb) {
+                async.concat(res, function(r, outterCb) {
                         
-                        attachData(query, r, parentResults, outterCb, true);
-                        // console.log('After attach');
+                        console.log('SINGLE', r);
+                        attachData(query, r, true, outterCb);
 
-                }, function(e) {
-                    console.log(parentResults);
+                }, function(e, d) {
+
+                    // for each query
+                    for (var i = d.length - 1; i >= 0; i--) {
+                        
+                        // if key not defined, set to array
+                        if(typeof parentResults[d[i].key] === 'undefined') {
+                            parentResults[d[i].key] = [];
+                        }
+
+                        parentResults[d[i].key].push(d[i].data);
+                    };
+                    // console.log('parentResultsArray', d);
+
                     console.log('Finished children of query:', location);
-                    parentCallback(e);
+                    parentCallback(e, parentResults);
+                
                 });                  
                 
             }
             // single resource
             else {
 
-                attachData(query, res, parentResults, parentCallback, false);
-                console.log('After attach');
+                attachData(query, res, false, function(e, d) {
+                    parentResults[d.key] = d.data;
+                    console.log('Finished children of query:', location);
+                    parentCallback(e, parentResults)
+                });
 
             }
 
         });
     };
 
-    var attachData = function(query, res, parentResults, callback, isArray) {
-        // pick out the data we want
-        // console.log('res', res);
-        console.log('Attaching',query.key);
-        console.log('parentResults', parentResults);
-
-        if(typeof query.select !== 'undefined') {
-            
-            console.log('SELECT', query.select);
-
-            for (var i = query.select.length - 1; i >= 0; i--) {
-                
-                // console.log(query.select);
-                var _r = selectRecursive(res, query.select[i]);
-
-                if(_.size(parentResults) === 0) {
-                    parentResults = _r;  
-                } else {
-                    // console.log(setToValue(query.select[i], _r, parentResults));
-                    parentResults[(query.populateAs || query.select[i].split('.').pop())] = _r;
-                }
-                // console.log(parentResults);
-            };
+    var attachData = function(query, res, isArray, callback) {
         
-        // use key
-        } else {
-            if(_.size(parentResults) === 0) {
-                if(isArray) {
-                    parentResults = [res];
-                } else {
-                    parentResults = res;
-                }
-            } else {
-                if(isArray) {
-                    parentResults[query.key].push(res);
-                } else {
-                    parentResults[query.key] = res;
-                }
-            }
-        }
-        console.log('parentResults', parentResults);
+        console.log('Res:', res);
 
+        // build key
+        var key;
+        if(typeof query.populateAs !== 'undefined') {
+            key = query.populateAs;
+        } else if(query.key) {
+            key = query.key;
+        } else if (query.select) {
+            key = query.select;
+        }
+
+        if(query.select) {
+            
+            // TODO select multiple
+            var res = selectRecursive(res, query.select[0]);
+
+            // for (var i = query.select.length - 1; i >= 0; i--) {
+                
+            //     var _r = selectRecursive(res, query.select[i]);
+            //     console.log('_r', _r);
+
+            //     temp_res[(query.populateAs || query.select[i].split('.').pop())] = _r;
+
+            //     // console.log(parentResults);
+            // };
+
+            // res = temp_res;
+
+
+        }
+        // console.log('JOINS', query.joins);
+
+        // no joins
         if(query.joins.length === 0) {
-            callback(null, parentResults); return;               
+
+            callback(null, {key: key, data: res}); return;               
+
         // process joins
         } else {
 
             // recursively execute joins
-            async.each(query.joins, function(join, cb) {
-                executeQuery(join, parentResults, cb);
-            }, function(e) {
-                callback(e, parentResults); return;
+            async.concat(query.joins, function(join, cb) {
+                executeQuery(join, res, cb);
+            }, function(e, d) {
+                console.log('Join data', d);
+                // console.log('Finished joins');
+                callback(e, {key: key, data: d[0]}); return;
             });
             
         }
 
-        // return;
+        return;
     };
 
-    var executeRequest = function(location, query_string, callback) {
+    var executeRequest = function(location, headers, query_string, callback) {
         
         var parts = urlParser.parse(location);
 
         var options = {
             host: parts.hostname,
             path: parts.pathname +  '?' + query_string,
-            port: parts.port
+            port: parts.port || (parts.protocol === 'https:' ? 443 : 80),
+            agent: false
         };
+
+        if(typeof headers !== 'undefined') {
+            options.headers = headers;
+        }
 
         var cb = function(response) {
             var str = '';
@@ -227,10 +241,14 @@ var _ = require('lodash'),
 
             response.on('error', function (e) {
                 callback(e);
-            });
+            })
         }
 
-        http.request(options, cb).end();
+        var schema = (parts.protocol === 'https:' ? https : http);
+
+        schema.request(options, cb).on('error', function (e) {
+            callback(e);
+        }).end();
     };
 
     var addQuery = function(key, select, where, limit, sortOn, sortDir, joins, bind, populateAs) {
