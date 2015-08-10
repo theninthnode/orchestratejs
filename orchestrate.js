@@ -1,4 +1,4 @@
-/*jshint maxstatements:15, maxdepth:2, maxcomplexity:5 */
+/*jshint maxstatements:15, maxdepth:3, maxcomplexity:5 */
 
 var _ = require('lodash'),
     http = require('http'),
@@ -25,25 +25,23 @@ var _ = require('lodash'),
         
         config = global.config;
 
-        var configError = checkConfig(config)
+        var configError = checkConfig(config);
 
         if(configError === false) {
             
             // build top level query
             // then inside recusively loop joined queries
-            var queries = addQuery(global.getFrom(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir, global.getJoins());
-
-            // console.log(queries); return;
+            var queries = addQuery(global.getFrom(), global.getSubdoc(), global.getSelect(), global.getWhere(), global.getLimit(), global.getOrderBy().sortOn, global.getOrderBy().sortDir, global.getJoins());
 
             executeQuery(queries, null, function(e,d) {
-                topLevelCallback(e, d);
+                topLevelCallback(e, d[queries.key]); // pass back first item
             }); // pass in public callback
 
         } else {
             topLevelCallback(configError);
         }
 
-    }
+    };
 
     var executeQuery = function(query, parentResults, parentCallback) {
         
@@ -68,26 +66,23 @@ var _ = require('lodash'),
 
         // exchange placeholders (:placeholder) with bindings
         for (var b in bindings) {
-            if (bindings.hasOwnProperty(b)) {
+            
+            if (bindings.hasOwnProperty(b) && typeof bindings[b] !== 'undefined') {
                 
-                // console.log('Binding', bindings[b]);
+                for (var w in query.where) {
 
-                // binding undefined
-                if(typeof bindings[b] === 'undefined') {
-                    parentCallback('Binding error: could not bind ' + (query.populateAs || query.key ) + '. :' + b + ' was undefined.', null); return;
-                }
-
-                for(w in query.where) {
-                    if (query.where.hasOwnProperty(w)) {
-                        // console.log('query.where', query.where[w]);
-                        if(query.where[w] === (':'+b)){
-                            // found match so update params and continue
-                            params[w] = bindings[b];
-                            continue;
-                        };
+                    if (query.where.hasOwnProperty(w) && query.where[w] === (':'+b)) {
+                        // found match so update params and continue
+                        params[w] = bindings[b];
+                        continue;
                     }
+
                 }
+
+            } else {
+                parentCallback('Binding error: could not bind ' + (query.decorateAs || query.key ) + '. :' + b + ' was undefined.', null); return;
             }
+
         }
 
         if(_.size(bindings) === 0) {
@@ -98,10 +93,10 @@ var _ = require('lodash'),
         var query_string = serialize(params);
         var location = query_conf.location;
 
-        console.log('location', location, query_string);
+        // console.log('location', location, query_string);
 
         // execute url http request
-        executeRequest(location, query_conf.headers, query_string, function(err, resp) {
+        executeRequest(location, query_conf, query_string, function(err, resp) {
     
             if(err) {
                 parentCallback(err); return;
@@ -111,26 +106,49 @@ var _ = require('lodash'),
             var res = JSON.parse(resp);
 
             if(query_conf.isArray === true) {
+            
+                var data = res;
 
-                // console.log('ARRAY!!', res.tracks);
+                // if we need to select a subdocument do it now
+                if(typeof query.subdocument !== 'undefined') {
+                    data = selectRecursive(res, query.subdocument);
+                }
 
-                async.concat(res, function(r, outterCb) {
+                // force to an array (could be object)
+                var arr = _.values(data);
+
+                async.concat(arr, function(single, outterCb) {
                         
-                        console.log('SINGLE', r);
-                        attachData(query, r, true, outterCb);
+                        // console.log('SINGLE', single);
+                        attachData(query, single, outterCb);
 
                 }, function(e, d) {
 
-                    // for each query
-                    for (var i = d.length - 1; i >= 0; i--) {
-                        
-                        // if key not defined, set to array
-                        if(typeof parentResults[d[i].key] === 'undefined') {
-                            parentResults[d[i].key] = [];
+                    if(typeof e !== 'undefined') {
+                        parentCallback(e);
+                    }
+
+                    // only take first element and attach as object
+                    if(typeof query.limit !== 'undefined' && query.limit === 1) {
+                        parentResults[d[0].key] = d[0].data;
+                    // take limit of all as array
+                    } else {
+
+                        var length = (typeof query.limit !== 'undefined' && query.limit <= d.length) ? query.limit : d.length;
+
+                        // for each query
+                        for (var i = length - 1; i >= 0; i--) {
+                            
+                            // if key not defined, set to array
+                            if(typeof parentResults[d[i].key] === 'undefined') {
+                                parentResults[d[i].key] = [];
+                            }
+
+                            parentResults[d[i].key].push(d[i].data);
                         }
 
-                        parentResults[d[i].key].push(d[i].data);
-                    };
+                    }
+
                     // console.log('parentResultsArray', d);
 
                     console.log('Finished children of query:', location);
@@ -142,10 +160,10 @@ var _ = require('lodash'),
             // single resource
             else {
 
-                attachData(query, res, false, function(e, d) {
+                attachData(query, res, function(e, d) {
                     parentResults[d.key] = d.data;
                     console.log('Finished children of query:', location);
-                    parentCallback(e, parentResults)
+                    parentCallback(e, parentResults);
                 });
 
             }
@@ -153,40 +171,33 @@ var _ = require('lodash'),
         });
     };
 
-    var attachData = function(query, res, isArray, callback) {
-        
-        console.log('Res:', res);
-
-        // build key
+    var buildKey = function(query) {
         var key;
-        if(typeof query.populateAs !== 'undefined') {
-            key = query.populateAs;
+        if(typeof query.decorateAs !== 'undefined') {
+            key = query.decorateAs;
         } else if(query.key) {
             key = query.key;
         } else if (query.select) {
             key = query.select;
         }
+        return key;
+    };
+
+    // takes query info, data, and a callback
+    // passes back key to attach on and processde data
+    var attachData = function(query, res, callback) {
+        
+        // console.log('Res:', res);
+
+        // build key
+        var key = buildKey(query);
 
         if(query.select) {
-            
+
             // TODO select multiple
-            var res = selectRecursive(res, query.select[0]);
-
-            // for (var i = query.select.length - 1; i >= 0; i--) {
-                
-            //     var _r = selectRecursive(res, query.select[i]);
-            //     console.log('_r', _r);
-
-            //     temp_res[(query.populateAs || query.select[i].split('.').pop())] = _r;
-
-            //     // console.log(parentResults);
-            // };
-
-            // res = temp_res;
-
+            res = selectRecursive(res, query.select);
 
         }
-        // console.log('JOINS', query.joins);
 
         // no joins
         if(query.joins.length === 0) {
@@ -200,8 +211,8 @@ var _ = require('lodash'),
             async.concat(query.joins, function(join, cb) {
                 executeQuery(join, res, cb);
             }, function(e, d) {
-                console.log('Join data', d);
-                // console.log('Finished joins');
+                // console.log('Join data', d);
+                console.log('Finished joins');
                 callback(e, {key: key, data: d[0]}); return;
             });
             
@@ -210,7 +221,11 @@ var _ = require('lodash'),
         return;
     };
 
-    var executeRequest = function(location, headers, query_string, callback) {
+    var isAuthTypeBasic = function(query) {
+        return (typeof query.auth !== 'undefined' && typeof query.auth.method !== 'undefined' && query.auth.method === 'basic');
+    };
+
+    var executeRequest = function(location, query_conf, query_string, callback) {
         
         var parts = urlParser.parse(location);
 
@@ -221,8 +236,14 @@ var _ = require('lodash'),
             agent: false
         };
 
-        if(typeof headers !== 'undefined') {
-            options.headers = headers;
+        // auth type Basic - attach header
+        if(isAuthTypeBasic(query_conf)) {
+            var auth = 'Basic ' + new Buffer(query_conf.auth.username + ':' + query_conf.auth.password).toString('base64');
+            query_conf.headers['Authorization'] = auth;
+        }
+
+        if(typeof query_conf.headers !== 'undefined') {
+            options.headers = query_conf.headers;
         }
 
         var cb = function(response) {
@@ -241,8 +262,8 @@ var _ = require('lodash'),
 
             response.on('error', function (e) {
                 callback(e);
-            })
-        }
+            });
+        };
 
         var schema = (parts.protocol === 'https:' ? https : http);
 
@@ -251,7 +272,7 @@ var _ = require('lodash'),
         }).end();
     };
 
-    var addQuery = function(key, select, where, limit, sortOn, sortDir, joins, bind, populateAs) {
+    var addQuery = function(key, sub, select, where, limit, sortOn, sortDir, joins, bind, decorateAs) {
 
         // query object
         var obj = {
@@ -260,6 +281,10 @@ var _ = require('lodash'),
 
         if(select) {
             obj.select = select;
+        }
+
+        if(sub) {
+            obj.subdocument = sub;
         }
 
         if(where) {
@@ -282,8 +307,8 @@ var _ = require('lodash'),
         obj.joins = [];
 
         for (var i = j.length - 1; i >= 0; i--) {
-            obj.joins.push(addQuery(j[i].query.getFrom(), j[i].query.getSelect(), j[i].query.getWhere(), j[i].query.getLimit(), j[i].query.getOrderBy().sortOn, j[i].query.getOrderBy().sortDir, j[i].query.getJoins(), j[i].bind, j[i].populateAs));
-        };
+            obj.joins.push(addQuery(j[i].query.getFrom(), j[i].query.getSubdoc(), j[i].query.getSelect(), j[i].query.getWhere(), j[i].query.getLimit(), j[i].query.getOrderBy().sortOn, j[i].query.getOrderBy().sortDir, j[i].query.getJoins(), j[i].bind, j[i].decorateAs));
+        }
 
         // if join
         if(bind) {
@@ -291,8 +316,8 @@ var _ = require('lodash'),
         }
 
         // if join
-        if(populateAs) {
-            obj.populateAs = populateAs;
+        if(decorateAs) {
+            obj.decorateAs = decorateAs;
         }
 
         return obj;
@@ -312,9 +337,9 @@ var _ = require('lodash'),
 
         return error;
 
-    }
+    };
 
-    // change this to node err
+    // TODO implement and change this to node err
     var checkEndpoints = function(endpoints) {
 
         endpoints.forEach(function(endpoint){
@@ -339,6 +364,7 @@ var _ = require('lodash'),
 
     };
 
+    // TODO implement and change to node error
     var checkEndpointExists = function(endpoints, key) {
         
         var find = _.findWhere(endpoints, {key: key});
@@ -361,13 +387,11 @@ var _ = require('lodash'),
             }
         }
         return str.join("&");
-    }
+    };
 
     var selectRecursive = function(obj, p) {
         var path = p.split('.');
         var o = _.pick(obj, path[0]);
-
-        // console.log(o[path[0]]);
 
         if(path.length > 1) {
             var new_path = _.clone(path);
@@ -378,49 +402,9 @@ var _ = require('lodash'),
         }
     };
 
-    var setToValue = function(path, value, root) {
-
-        var segments = path.split('.'),
-        cursor = root,
-        segment,
-        i;
-
-        for (i = 0; i < segments.length - 1; ++i) {
-            segment = segments[i];
-            cursor[segment] = cursor[segment] || {};
-        }
-        // console.log(cursor);
-        return cursor[segments[i]] = value;
-
-    };
-
-    var recursivelyAttach = function(path, attachTo, data, previous) {
-
-        // TODO
-
-        if(typeof _return === 'undefined') {
-            _return = {}; 
-        }
-
-        var p = path.split('.');
-
-        if(p.length === 1 && previous === 'undefined') {
-            attachTo[p[0]] = data;
-        } else if(p.length === 1 && previous !== 'undefined') {
-            attachTo[previous][p[0]] = data;
-        } else {
-            var new_path = _.clone(p);
-            new_path.shift();
-            return recursivelyAttach(new_path.join('.'), attachTo, data, p[0]);
-        }
-
-        return attachTo;
-
-    }
-
     // -------- Public API --------
 
-	Orchestrate.prototype.setSelect = function(select) {
+	Orchestrate.prototype.select = function(select) {
         this.select_statement = select;
         return this;
 
@@ -430,7 +414,17 @@ var _ = require('lodash'),
         return this.select_statement;
     };
 
-    Orchestrate.prototype.setFrom = function(endpoint) {
+    Orchestrate.prototype.subdoc = function(sub) {
+        this.subdocument = sub;
+        return this;
+
+    };
+
+    Orchestrate.prototype.getSubdoc = function() {
+        return this.subdocument;
+    };
+
+    Orchestrate.prototype.from = function(endpoint) {
     
     	this.from_endpoint = endpoint;
         return this;
@@ -441,7 +435,7 @@ var _ = require('lodash'),
         return this.from_endpoint;    
     };
 
-    Orchestrate.prototype.addWhere = function(key, val) {
+    Orchestrate.prototype.where = function(key, val) {
         
         this.wheres[key] = val;
             
@@ -453,13 +447,13 @@ var _ = require('lodash'),
         return this.wheres;
     };    
 
-    Orchestrate.prototype.addJoin = function(query, options) {
+    Orchestrate.prototype.decorate = function(name, query, bind) {
     	
         this.joins.push({
             query: query,
-            method: options.method || 'waterfall',
-            bind: options.bind || null, 
-            populateAs: options.populateAs || null
+            // method: options.method || 'waterfall',
+            bind: bind || null, 
+            decorateAs: name
         });
 
         return this;
@@ -470,7 +464,7 @@ var _ = require('lodash'),
         return this.joins;
     };
 
-    Orchestrate.prototype.setOrderBy = function(property, direction) {
+    Orchestrate.prototype.orderBy = function(property, direction) {
     	this.sortOn = property;
         this.sortDir = direction;
     };
@@ -479,10 +473,10 @@ var _ = require('lodash'),
         return {
             sortOn: this.sortOn,
             sortDir: this.sortDir
-        }
+        };
     };
 
-    Orchestrate.prototype.setLimit = function(limit) {
+    Orchestrate.prototype.take = function(limit) {
     	this.limit = limit;
     };
 
@@ -495,15 +489,6 @@ var _ = require('lodash'),
         buildQueries(this, function(err, results) {
             callback(err, results);
         });
-
-    };
-
-    Orchestrate.prototype.count = function(callback) {
-
-        // do stuff
-        if(typeof callback === "function") {
-            callback(); // pass data
-        }
 
     };
 
